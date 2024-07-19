@@ -1,8 +1,7 @@
 //! Measurement parsing and preprocessing
 
-use std::collections::VecDeque;
 
-use crate::{types::{LogicPortPins, Metadata}};
+use crate::{types::{ Metadata}};
 
 const ADC_MULTIPLIER: f32 = 1.8 / 163840.;
 const SPIKE_FILTER_ALPHA: f32 = 0.18;
@@ -13,9 +12,11 @@ const SPIKE_FILTER_SAMPLES: isize = 3;
 /// A single parsed measurement
 pub struct Measurement {
     /// The measured current in mA.
-    pub micro_amps: f32,
-    /// Logic port bits
-    pub pins: LogicPortPins,
+    pub micro_amps_sum: f32,
+    /// sample count
+    pub count: usize,
+    /// missed samples
+    pub missed: usize,
 }
 
 struct AccumulatorState {
@@ -34,6 +35,10 @@ pub struct MeasurementAccumulator {
     state: AccumulatorState,
     buf: Vec<u8>,
     metadata: Metadata,
+    /// num samples
+    pub count: usize,
+    /// sum of samples
+    pub sum: f32,
 }
 
 impl MeasurementAccumulator {
@@ -52,12 +57,13 @@ impl MeasurementAccumulator {
                 expected_counter: None,
             },
             buf: Vec::with_capacity(4096),
+            count:0,
+            sum: 0.0,
         }
     }
 
-    /// Feed a number of bytes to the accumulator, pushing the [Result]s into the
-    /// passed ring buffer.
-    pub fn feed_into(&mut self, bytes: &[u8], buf: &mut VecDeque<Measurement>) -> usize {
+    /// Feed a number of bytes to the accumulator, returning missed frames
+    pub fn feed_into(&mut self, bytes: &[u8]) -> usize {
         if bytes.is_empty() {
             return 0;
         }
@@ -86,7 +92,7 @@ impl MeasurementAccumulator {
             }
 
             let adc_result = get_adc(raw) * 4;
-            let pins = get_logic(raw).into();
+            //let pins = get_logic(raw).into();
             let micro_amps = get_adc_result(
                 &self.metadata,
                 &mut self.state,
@@ -97,10 +103,12 @@ impl MeasurementAccumulator {
                 self.state.expected_counter.replace(counter);
             }
 
-            buf.push_back(Measurement {
+           /* buf.push_back(Measurement {
                 micro_amps,
                 pins,
-            })
+            })*/
+            self.sum += micro_amps;
+            self.count += 1;
         }
         self.buf.drain(..end);
         samples_missed
@@ -166,78 +174,6 @@ fn get_adc_result(
 }
 
 
-/// Indicates whether a set of [Measurement]s matched
-#[derive(Debug)]
-pub enum MeasurementMatch {
-    /// A set of [Measurement]s did match
-    Match(Measurement),
-    /// No matching [Measurement]s in the last chunk
-    NoMatch,
-}
-
-/// Extension trait for VecDeque<Measurement>
-pub trait MeasurementIterExt {
-    /// Combine items into a single [MeasurementMatch::Match], if there are items.
-    /// If there are none, [MeasurementMatch::NoMatch] is returned.
-    /// Set combined logic port pin high if and only if more than half
-    /// of the measurements indicate the pin was high
-    fn combine(self, missed: usize) -> MeasurementMatch;
-
-    /// Combine items with matching logic port state into a single [MeasurementMatch::Match],
-    /// if there are items. If there are none, [MeasurementMatch::NoMatch] is returned.
-    /// Set combined logic port pin high if and only if more than half
-    /// of the measurements indicate the pin was high
-    fn combine_matching(self, missed: usize, matching_pins: LogicPortPins) -> MeasurementMatch;
-}
-
-impl<I: Iterator<Item = Measurement>> MeasurementIterExt for I {
-    fn combine(self, missed: usize) -> MeasurementMatch {
-        let mut pin_high_count = [0usize; 8];
-        let mut count = 0;
-        let mut sum = 0f32;
-        self.for_each(|m| {
-            count += 1;
-            sum += m.micro_amps;
-            m.pins
-                .inner()
-                .iter()
-                .enumerate()
-                .filter(|(_, &p)| p.is_high())
-                .for_each(|(i, _)| pin_high_count[i] += 1);
-        });
-
-        if count == 0 {
-            // No measurements
-            return MeasurementMatch::NoMatch;
-        }
-
-        // Set combined pin high if and only if more than half
-        // of the measurements indicate the pin was high
-        let mut pins = [false; 8];
-        pin_high_count
-            .into_iter()
-            .enumerate()
-            .filter(|(_, p)| *p > count / 2)
-            .for_each(|(i, _)| pins[i] = true);
-        let avg = sum / (count - missed) as f32;
-
-        MeasurementMatch::Match(Measurement {
-            micro_amps: avg,
-            pins: pins.into(),
-        })
-    }
-
-    fn combine_matching(self, missed: usize, matching_pins: LogicPortPins) -> MeasurementMatch {
-        let iter = self.filter(|m| {
-            m.pins
-                .inner()
-                .iter()
-                .enumerate()
-                .all(|(i, l)| l.matches(matching_pins.inner()[i]))
-        });
-        iter.combine(missed)
-    }
-}
 
 const fn generate_mask(bits: u32, pos: u32) -> u32 {
     (2u32.pow(bits as u32) - 1) << pos
@@ -254,7 +190,7 @@ macro_rules! masked_value {
 masked_value!(get_adc, 14, 0);
 masked_value!(get_range, 3, 14);
 masked_value!(get_counter, 6, 18);
-masked_value!(get_logic, 8, 24);
+//masked_value!(get_logic, 8, 24);
 
 #[cfg(test)]
 mod tests {

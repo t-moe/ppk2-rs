@@ -1,28 +1,28 @@
 #![doc = include_str!("../README.md")]
 #![deny(missing_docs)]
 
-use measurement::{MeasurementAccumulator, MeasurementIterExt, MeasurementMatch};
+use measurement::{MeasurementAccumulator};
 use serialport::{ClearBuffer::Input, FlowControl, SerialPort};
 use std::str::Utf8Error;
 use std::sync::mpsc::{self, Receiver, SendError, TryRecvError};
 use std::{
     borrow::Cow,
-    collections::VecDeque,
     io,
     sync::{Arc, Condvar, Mutex},
     thread,
     time::Duration,
 };
 use thiserror::Error;
-use types::{DevicePower, LogicPortPins, MeasurementMode, Metadata, SourceVoltage};
+use types::{DevicePower, MeasurementMode, Metadata, SourceVoltage};
 
 use crate::cmd::Command;
+use crate::measurement::Measurement;
 
 pub mod cmd;
 pub mod measurement;
 pub mod types;
 
-const SPS_MAX: usize = 90_000;
+const SPS_MAX: usize = 100_000;
 
 #[derive(Error, Debug)]
 /// PPK2 communication or data parsing error.
@@ -39,7 +39,7 @@ pub enum Error {
     #[error("Parse error in \"{0}\"")]
     Parse(String),
     #[error("Error sending measurement: {0}")]
-    SendMeasurement(#[from] SendError<MeasurementMatch>),
+    SendMeasurement(#[from] SendError<Measurement>),
     #[error("Error sending stop signal: {0}")]
     SendStopSignal(#[from] SendError<()>),
     #[error("Worker thread signal error: {0}")]
@@ -123,8 +123,8 @@ impl Ppk2 {
     pub fn start_measurement(
         self,
         sps: usize,
-    ) -> Result<(Receiver<MeasurementMatch>, impl FnOnce() -> Result<Self>)> {
-        self.start_measurement_matching(LogicPortPins::default(), sps)
+    ) -> Result<(Receiver<Measurement>, impl FnOnce() -> Result<Self>)> {
+        self.start_measurement_matching(sps)
     }
 
     /// Start measurements. Returns a tuple of:
@@ -134,14 +134,13 @@ impl Ppk2 {
     /// device.
     pub fn start_measurement_matching(
         mut self,
-        pins: LogicPortPins,
         sps: usize,
-    ) -> Result<(Receiver<MeasurementMatch>, impl FnOnce() -> Result<Self>)> {
+    ) -> Result<(Receiver<Measurement>, impl FnOnce() -> Result<Self>)> {
         // Stuff needed to communicate with the main thread
         // ready allows main thread to signal worker when serial input buf is cleared.
         let ready = Arc::new((Mutex::new(false), Condvar::new()));
         // This channel is for sending measurements to the main thread.
-        let (meas_tx, meas_rx) = mpsc::channel::<MeasurementMatch>();
+        let (meas_tx, meas_rx) = mpsc::channel::<Measurement>();
         // This channel allows the main thread to notify that the worker thread can stop
         // parsing data.
         let (sig_tx, sig_rx) = mpsc::channel::<()>();
@@ -162,7 +161,7 @@ impl Ppk2 {
                     .unwrap();
 
                 let mut buf = [0u8; 1024];
-                let mut measurement_buf = VecDeque::with_capacity(SPS_MAX);
+                //let mut measurement_buf = VecDeque::with_capacity(SPS_MAX);
                 let mut missed = 0;
                 loop {
                     // Check whether the main thread has signaled
@@ -175,11 +174,18 @@ impl Ppk2 {
 
                     // Now we read chunks and feed them to the accumulator
                     let n = port.read(&mut buf)?;
-                    missed += accumulator.feed_into(&buf[..n], &mut measurement_buf);
-                    let len = measurement_buf.len();
-                    if len >= SPS_MAX / sps {
-                        let measurement = measurement_buf.drain(..).combine_matching(missed, pins);
-                        meas_tx.send(measurement)?;
+                    missed += accumulator.feed_into(&buf[..n]);
+
+
+
+                    if accumulator.count >= SPS_MAX / sps  {
+                        meas_tx.send(Measurement{
+                            micro_amps_sum: accumulator.sum,
+                            count: accumulator.count,
+                            missed,
+                        })?;
+                        accumulator.sum = 0.0;
+                        accumulator.count = 0;
                         missed = 0;
                     }
                 }

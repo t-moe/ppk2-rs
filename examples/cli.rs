@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::Parser;
 use ppk2::{
     types::{DevicePower, MeasurementMode, SourceVoltage, LogicPortPins, Level},
-    Ppk2, try_find_ppk2_port, measurement::MeasurementMatch,
+    Ppk2, try_find_ppk2_port,
 };
 
 use std::{
@@ -84,12 +84,12 @@ fn main() -> Result<()> {
     // Set up pin pattern for matching
     // This particular setup will only
     // match measurements if pin 0 is low.
-    let mut levels = [Level::Either; 8];
-    levels[0] = Level::Low;
-    let pins = LogicPortPins::with_levels(levels);
+    //let mut levels = [Level::Either; 8];
+    //levels[0] = Level::Low;
+    //let pins = LogicPortPins::with_levels(levels);
 
     // Start measuring.
-    let (rx, kill) = ppk2.start_measurement_matching(pins, args.sps)?;
+    let (rx, kill) = ppk2.start_measurement(args.sps)?;
 
     // Set up sigkill handler.
     let mut kill = Some(kill);
@@ -103,14 +103,12 @@ fn main() -> Result<()> {
     let r: Result<()> = loop {
         let rcv_res = rx.recv_timeout(Duration::from_millis(2000));
         count += 1;
-        use MeasurementMatch::*;
+
         match rcv_res {
-            Ok(Match(m)) => {
-                debug!("Last chunk average: {:.4} μA", m.micro_amps);
+            Ok(m) => {
+                debug!("Last chunk average: {:.4} μA", m.micro_amps_sum);
             }
-            Ok(NoMatch) => {
-                debug!("No match in the last chunk of measurements");
-            }
+
             Err(RecvTimeoutError::Disconnected) => break Ok(()),
             Err(e) => {
                 error!("Error receiving data: {e:?}");
